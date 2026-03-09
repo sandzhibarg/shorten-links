@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.cache import close_redis, init_redis
 from app.database import Base, engine
+import app.models  # noqa: F401 - нужен чтоб модели зарегались в Base.metadata
 
 
 @asynccontextmanager
