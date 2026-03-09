@@ -1,5 +1,5 @@
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import RedirectResponse
@@ -8,9 +8,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_auth
 from app.cache import cache_delete, cache_get, cache_set
+from app.config import settings
 from app.database import get_db
 from app.models import ExpiredLink, Link, User
-from app.schemas import LinkCreate, LinkOut, LinkStats, LinkUpdate
+from app.schemas import ExpiredLinkOut, LinkCreate, LinkOut, LinkStats, LinkUpdate
 
 router = APIRouter(prefix="/links", tags=["links"])
 
@@ -84,6 +85,47 @@ async def search_by_url(
     result = await db.execute(select(Link).where(Link.original_url == original_url))
     links = result.scalars().all()
     return links
+
+@router.get("/expired-history", response_model=list[ExpiredLinkOut])
+async def get_expired_history(db: AsyncSession = Depends(get_db)):
+    # история всех истекших и удаленых ссылок
+    result = await db.execute(select(ExpiredLink).order_by(ExpiredLink.expired_at.desc()))
+    return result.scalars().all()
+
+
+@router.delete("/cleanup/unused", status_code=status.HTTP_200_OK)
+async def cleanup_unused_links(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_auth),
+):
+    # удаляем ссылки которые не использовались n дней (из конфига)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.unused_link_days)
+
+    result = await db.execute(
+        select(Link).where(
+            (Link.last_used_at < cutoff) | (Link.last_used_at.is_(None) & (Link.created_at < cutoff))
+        )
+    )
+    unused = result.scalars().all()
+
+    count = 0
+    for link in unused:
+        expired = ExpiredLink(
+            short_code=link.short_code,
+            original_url=link.original_url,
+            user_id=link.user_id,
+            created_at=link.created_at,
+            use_count=link.use_count,
+            reason="unused",
+        )
+        db.add(expired)
+        await db.delete(link)
+        await cache_delete(f"link:{link.short_code}")
+        await cache_delete(f"stats:{link.short_code}")
+        count += 1
+
+    await db.commit()
+    return {"deleted": count, "message": f"removed {count} unused links (inactive for {settings.unused_link_days} days)"}
 
 @router.get("/{short_code}/stats", response_model=LinkStats)
 async def get_stats(
