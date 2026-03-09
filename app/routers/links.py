@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user, require_auth
 from app.database import get_db
 from app.models import ExpiredLink, Link, User
-from app.schemas import LinkCreate, LinkOut, LinkUpdate
+from app.schemas import LinkCreate, LinkOut, LinkStats, LinkUpdate
 
 router = APIRouter(prefix="/links", tags=["links"])
 
@@ -73,6 +73,15 @@ async def search_by_url(
     result = await db.execute(select(Link).where(Link.original_url == original_url))
     links = result.scalars().all()
     return links
+
+@router.get("/{short_code}/stats", response_model=LinkStats)
+async def get_stats(
+    short_code: str,
+    db: AsyncSession = Depends(get_db),
+):
+    # статистика по ссылке - оригинальный урл, дата создания, кол-во переходов, дата последнего использования
+    link = await get_link_or_404(short_code, db)
+    return link
 
 @router.get("/{short_code}")
 async def redirect_to_url(
