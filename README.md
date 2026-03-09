@@ -2,6 +2,8 @@
 
 Сервис для сокращения ссылок на FastAPI + PostgreSQL + Redis.
 
+Развернутый сервис на render.com [тут](https://shorten-links-z86x.onrender.com).
+
 ## Стек
 
 - **FastAPI** - веб-фреймворк
