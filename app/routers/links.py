@@ -7,11 +7,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user, require_auth
+from app.cache import cache_delete, cache_get, cache_set
 from app.database import get_db
 from app.models import ExpiredLink, Link, User
 from app.schemas import LinkCreate, LinkOut, LinkStats, LinkUpdate
 
 router = APIRouter(prefix="/links", tags=["links"])
+
+# ttl для кэша редиректа 5 мин
+REDIRECT_CACHE_TTL = 300
+# ttl для кэша статистики 60с
+STATS_CACHE_TTL = 60
 
 
 def generate_short_code(length: int = 8) -> str:
@@ -24,6 +30,11 @@ async def get_link_or_404(short_code: str, db: AsyncSession) -> Link:
     if not link:
         raise HTTPException(status_code=404, detail="link not found")
     return link
+
+async def invalidate_link_cache(short_code: str):
+    # чистим все кэши по этой ссылке
+    await cache_delete(f"link:{short_code}")
+    await cache_delete(f"stats:{short_code}")
 
 @router.post("/shorten", response_model=LinkOut, status_code=status.HTTP_201_CREATED)
 async def shorten_link(
@@ -79,8 +90,22 @@ async def get_stats(
     short_code: str,
     db: AsyncSession = Depends(get_db),
 ):
-    # статистика по ссылке - оригинальный урл, дата создания, кол-во переходов, дата последнего использования
+    # статистика - сначала смотрим кэш
+    cached = await cache_get(f"stats:{short_code}")
+    if cached:
+        return cached
+
     link = await get_link_or_404(short_code, db)
+
+    stats_data = {
+        "short_code": link.short_code,
+        "original_url": link.original_url,
+        "created_at": link.created_at.isoformat(),
+        "last_used_at": link.last_used_at.isoformat() if link.last_used_at else None,
+        "use_count": link.use_count,
+        "expires_at": link.expires_at.isoformat() if link.expires_at else None,
+    }
+    await cache_set(f"stats:{short_code}", stats_data, ttl=STATS_CACHE_TTL)
     return link
 
 @router.get("/{short_code}")
@@ -88,12 +113,23 @@ async def redirect_to_url(
     short_code: str,
     db: AsyncSession = Depends(get_db),
 ):
-    # редирект на оригинальный урл, обновляем счетчик переходов
+    # редирект - сначала проверяем кэш чтоб не лезть в бд
+    cached = await cache_get(f"link:{short_code}")
+    if cached:
+        # ссылка в кэше - обновляем счетчик в бд и редиректим
+        result = await db.execute(select(Link).where(Link.short_code == short_code))
+        link = result.scalar_one_or_none()
+        if link:
+            link.use_count += 1
+            link.last_used_at = datetime.now(timezone.utc)
+            await db.commit()
+        return RedirectResponse(url=cached["original_url"], status_code=307)
+
+    # кэша нет - идем в бд
     link = await get_link_or_404(short_code, db)
 
     # проверяем не истекла ли ссылка
     if link.expires_at and link.expires_at < datetime.now(timezone.utc):
-        # переносим в архив и удаляем
         expired = ExpiredLink(
             short_code=link.short_code,
             original_url=link.original_url,
@@ -106,6 +142,9 @@ async def redirect_to_url(
         await db.delete(link)
         await db.commit()
         raise HTTPException(status_code=410, detail="link has expired")
+
+    # кэшируем урл для будущих запросов
+    await cache_set(f"link:{short_code}", {"original_url": link.original_url}, ttl=REDIRECT_CACHE_TTL)
 
     link.use_count += 1
     link.last_used_at = datetime.now(timezone.utc)
@@ -124,7 +163,6 @@ async def delete_link(
     if link.user_id != current_user.id:
         raise HTTPException(status_code=403, detail="not your link")
 
-    # сохраняем в историю перед удалением
     expired = ExpiredLink(
         short_code=link.short_code,
         original_url=link.original_url,
@@ -136,6 +174,8 @@ async def delete_link(
     db.add(expired)
     await db.delete(link)
     await db.commit()
+    # чистим кэш после удаления
+    await invalidate_link_cache(short_code)
 
 @router.put("/{short_code}", response_model=LinkOut)
 async def update_link(
@@ -154,7 +194,6 @@ async def update_link(
         link.original_url = str(data.original_url)
 
     if data.short_code is not None:
-        # проверяем что новый код не занят
         existing = await db.execute(select(Link).where(Link.short_code == data.short_code))
         if existing.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="this short code is already taken")
@@ -162,4 +201,8 @@ async def update_link(
 
     await db.commit()
     await db.refresh(link)
+    # инвалидируем кэш по старому коду (и новому на всякий случай)
+    await invalidate_link_cache(short_code)
+    if data.short_code:
+        await invalidate_link_cache(data.short_code)
     return link
