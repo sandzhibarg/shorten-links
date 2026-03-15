@@ -122,3 +122,60 @@ Redis кэширует:
 - `stats:{short_code}` — статистика, TTL 60 секунд
 
 Кэш инвалидируется при обновлении или удалении ссылки.
+
+## Тестирование
+
+### Запуск тестов
+
+```bash
+pip install -r requirements.txt
+pytest tests/ -v
+```
+
+### Покрытие кода
+
+```bash
+coverage run -m pytest tests/
+coverage report         # в терминале
+coverage html           # HTML-отчёт в папке htmlcov/
+```
+
+Открыть отчёт: `htmlcov/index.html`
+
+**Текущее покрытие: 92%** (требование: ≥ 90%)
+
+### Структура тестов
+
+| Файл | Описание |
+|---|---|
+| `tests/test_unit.py` | юнит-тесты: генерация кодов, хэширование паролей, JWT |
+| `tests/test_auth.py` | функциональные тесты аутентификации (register, login, /me) |
+| `tests/test_links.py` | функциональные тесты ссылок (CRUD, редирект, кэш, cleanup) |
+| `tests/test_direct.py` | прямые вызовы async-функций для полного покрытия |
+| `tests/locustfile.py` | нагрузочные тесты (Locust) |
+
+Тесты используют SQLite in-memory вместо PostgreSQL и FakeRedis вместо реального Redis — внешние зависимости не нужны.
+
+### Нагрузочное тестирование
+
+```bash
+# тест локально
+uvicorn app.main:app --host 0.0.0.0 --port 8000 # в отдельном терминале
+locust -f tests/locustfile.py --host http://localhost:8000
+
+# тест задеплоенного сервиса
+locust -f tests/locustfile.py --host https://shorten-links-z86x.onrender.com
+```
+
+Веб-интерфейс: `http://localhost:8089`
+
+#### Результаты (50 пользователей, render.com)
+
+| Эндпоинт | Median | Avg | RPS |
+|---|---|---|---|
+| `GET /links/{code}` (без кэша) | 660 ms | 797 ms | 4.8 |
+| `GET /links/{code}` (кэш) | 600 ms | 743 ms | **17.8** |
+| `GET /links/{code}/stats` (без кэша) | 470 ms | 572 ms | 2.0 |
+| `GET /links/{code}/stats` (кэш) | 310 ms | 365 ms | **4.4** |
+
+Кэширование даёт прирост пропускной способности в **3–4 раза** для повторных запросов. Ошибок: 0 из 8 377 запросов.
