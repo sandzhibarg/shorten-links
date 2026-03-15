@@ -1,7 +1,7 @@
 import os
 
 # тестовые env-переменные до импорта приложения,
-# чтобы pydantic-settings не прочитал реальный .env и упал
+# чтобы pydantic-settings не прочитал реальный .env и не упал
 os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
 os.environ["SECRET_KEY"] = "test-secret-key-for-testing-only"
 
@@ -31,7 +31,6 @@ TestSessionLocal = async_sessionmaker(
     expire_on_commit=False,
 )
 
-
 class FakeRedis:
     # простой фейк редиса чтоб не поднимать реальный
     def __init__(self):
@@ -49,9 +48,13 @@ class FakeRedis:
     async def aclose(self):
         pass
 
-
 _fake_redis = FakeRedis()
 
+@pytest.fixture(scope="session", autouse=True)
+async def dispose_engine():
+    # закрываем движок после всей сессии, иначе event loop висит
+    yield
+    await test_engine.dispose()
 
 @pytest.fixture(autouse=True)
 async def setup_and_clean_db():
@@ -68,12 +71,10 @@ async def setup_and_clean_db():
         for table in reversed(Base.metadata.sorted_tables):
             await conn.execute(table.delete())
 
-
 @pytest.fixture
 async def db_session():
     async with TestSessionLocal() as session:
         yield session
-
 
 @pytest.fixture
 async def client(db_session):
@@ -88,7 +89,6 @@ async def client(db_session):
         yield ac
     app.dependency_overrides.clear()
 
-
 @pytest.fixture
 async def test_user(db_session):
     # создаем тестового юзера напрямую в бд
@@ -101,7 +101,6 @@ async def test_user(db_session):
     await db_session.commit()
     await db_session.refresh(user)
     return user
-
 
 @pytest.fixture
 def auth_headers(test_user):
